@@ -1,0 +1,6 @@
+[tool.ruff]
+line-length = 100        # 한 줄 최대 길이 (기본 88은 좀 짧아요)
+target-version = "py311"  # 파이썬 3.11 기준 (배포 서버 Dockerfile과 동일)
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]  # E=스타일, F=오류, I=import 정렬

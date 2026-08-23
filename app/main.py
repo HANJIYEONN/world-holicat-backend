@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Base, engine
-from .routers import entries, auth, favorites
+from .routers import auth, cat_note, entries, favorites
 
 app = FastAPI(title="두통 기록 차트 API")
 
@@ -26,6 +26,9 @@ app.include_router(entries.router)
 app.include_router(auth.router)
 
 app.include_router(favorites.router)
+
+app.include_router(cat_note.router)
+
 
 @app.on_event("startup")
 def on_startup() -> None:

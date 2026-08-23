@@ -27,7 +27,12 @@ def list_entries(
     return db.scalars(
         select(HeadacheEntry)
         # 내 기록 + 로그인 기능이 생기기 전의 옛 기록(주인 없음)을 함께 보여줘요
-        .where(or_(HeadacheEntry.user_email == user_email, HeadacheEntry.user_email.is_(None)))
+        .where(
+            or_(
+                HeadacheEntry.user_email == user_email,
+                HeadacheEntry.user_email.is_(None),
+            )
+        )
         .order_by(HeadacheEntry.entry_date.desc())
     ).all()
 
@@ -38,7 +43,9 @@ def create_entry(
     db: Session = Depends(get_db),
     user_email: str = Depends(get_current_user_email),
 ):
-    entry = HeadacheEntry(**payload.model_dump(), user_email=user_email)  # 기록에 주인 도장!
+    entry = HeadacheEntry(
+        **payload.model_dump(), user_email=user_email
+    )  # 기록에 주인 도장!
     db.add(entry)
     db.commit()
     db.refresh(entry)
