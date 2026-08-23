@@ -1,0 +1,37 @@
+# 로컬 개발용 — 백엔드 + MySQL을 함께 띄워요.
+# 운영 배포는 .github/workflows/deploy.yaml 이 담당하고, 이 파일은 로컬 전용이에요.
+#
+# 사용법: docker compose -f docker-compose.dev.yml up -d
+# ⚠️ .env(운영 TiDB)가 아니라 .env.docker(로컬 MySQL)를 쓰는지 꼭 확인하세요.
+
+services:
+  db:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: devpassword
+      # 사이트 전체(두통 기록 + 고양이 수첩)를 한 DB에 담아요 — 결정 D-21
+      MYSQL_DATABASE: world_holicat
+    ports:
+      - "127.0.0.1:3307:3306" # 맥에 설치된 mysql(3306)과 겹치지 않게 3307로
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pdevpassword"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build: . # 저장소 루트가 곧 백엔드예요
+    depends_on:
+      db:
+        condition: service_healthy # DB가 준비된 뒤에 시작
+    env_file:
+      - ./.env.docker
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./app:/app/app # 코드 고치면 바로 반영
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  mysql-data:

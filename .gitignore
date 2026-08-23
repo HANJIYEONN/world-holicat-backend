@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+.ruff_cache/
+
+# 파이참
+.idea/
+
+# 비밀값 — 절대 올리지 마세요 (.env.example만 허용)
+.env
+.env.*
+!.env.example
