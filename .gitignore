@@ -15,3 +15,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# 테스트가 만드는 임시 DB
+tests/test.db

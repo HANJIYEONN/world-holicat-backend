@@ -4,3 +4,7 @@ target-version = "py311"  # 파이썬 3.11 기준 (배포 서버 Dockerfile과 �
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]  # E=스타일, F=오류, I=import 정렬
+
+[tool.pytest.ini_options]
+pythonpath = ["."]        # tests/ 에서 app/ 을 불러올 수 있게
+testpaths = ["tests"]

@@ -1,0 +1,5 @@
+# 개발·테스트할 때만 필요한 것들 (운영 서버에는 안 깔려요)
+# 설치: pip install -r requirements-dev.txt
+pytest
+httpx      # FastAPI TestClient가 내부적으로 써요
+ruff       # 코드 검사기
