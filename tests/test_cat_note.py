@@ -159,3 +159,132 @@ def test_내_수첩만_보인다(client, auth, other_auth):
 
 def test_who는_내_이메일을_돌려준다(client, auth):
     assert client.get(f"{BASE}/who", headers=auth).json()["당신은"] == TEST_EMAIL
+
+
+# ── GET /note-id/check (아이디 쓸 수 있나 확인) ────────
+
+
+def 계정만들기(client, auth, note_id: str, partner: str = "kongi"):
+    """테스트용: 그 아이디로 계정을 하나 만들어둬요."""
+    return client.post(
+        f"{BASE}/me",
+        headers=auth,
+        json={"partner": partner, "note_id": note_id, "nickname": "지우"},
+    )
+
+
+def test_아이디_검사도_로그인이_필요하다(client):
+    assert client.get(f"{BASE}/note-id/check", params={"value": "jiwoo07"}).status_code == 401
+
+
+def test_안_쓰는_아이디는_쓸_수_있다(client, auth):
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "jiwoo07"})
+    assert res.status_code == 200
+    assert res.json() == {"available": True, "reason": None, "suggestions": []}
+
+
+def test_이미_있는_아이디는_duplicate(client, auth, other_auth):
+    계정만들기(client, other_auth, "jiwoo07")
+
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "jiwoo07"})
+
+    body = res.json()
+    assert body["available"] is False
+    assert body["reason"] == "duplicate"
+    assert len(body["suggestions"]) > 0  # 대안을 줘야 해요
+
+
+def test_짧으면_too_short(client, auth):
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "abc"})
+    assert res.json()["reason"] == "too_short"
+
+
+def test_비어있으면_too_short(client, auth):
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": ""})
+    assert res.json()["reason"] == "too_short"
+
+
+def test_길면_too_long(client, auth):
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "a" * 16})
+    assert res.json()["reason"] == "too_long"
+
+
+def test_한글은_invalid_char(client, auth):
+    """전세계 학습자가 쓰니까 영문·숫자만 (D-10)."""
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "지우07"})
+    assert res.json()["reason"] == "invalid_char"
+
+
+def test_특수문자는_invalid_char(client, auth):
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "ji-woo07"})
+    assert res.json()["reason"] == "invalid_char"
+
+
+def test_짧고_한글이면_글자_문제를_먼저_알려준다(client, auth):
+    """"지우"는 짧기도 하고 한글이기도 한데, 더 도움 되는 쪽을 알려줘요."""
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "지우"})
+    assert res.json()["reason"] == "invalid_char"
+
+
+def test_대문자로_물어도_소문자로_판단한다(client, auth, other_auth):
+    """jiwoo07을 이미 쓰고 있으면 JiWoo07도 못 써요 (D-10)."""
+    계정만들기(client, other_auth, "jiwoo07")
+
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "JiWoo07"})
+
+    assert res.json()["reason"] == "duplicate"
+
+
+def test_앞뒤_공백은_무시한다(client, auth):
+    res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": "  jiwoo07  "})
+    assert res.json()["available"] is True
+
+
+# ── 추천 아이디 ──────────────────────────────────────
+
+
+def test_추천은_최대_3개(client, auth, other_auth):
+    계정만들기(client, other_auth, "jiwoo07")
+
+    suggestions = client.get(
+        f"{BASE}/note-id/check", headers=auth, params={"value": "jiwoo07"}
+    ).json()["suggestions"]
+
+    assert len(suggestions) <= 3
+
+
+def test_추천은_전부_규칙에_맞는다(client, auth, other_auth):
+    """추천해놓고 정작 못 쓰면 곤란하니까요."""
+    계정만들기(client, other_auth, "jiwoo07")
+
+    suggestions = client.get(
+        f"{BASE}/note-id/check", headers=auth, params={"value": "jiwoo07"}
+    ).json()["suggestions"]
+
+    for s in suggestions:
+        assert 4 <= len(s) <= 15, f"길이 규칙 위반: {s}"
+        assert s.isalnum(), f"영문·숫자가 아님: {s}"
+
+
+def test_추천에_이미_쓰는_아이디는_안_들어간다(client, auth, other_auth):
+    """jiwoo1 이 이미 있으면 그건 추천하면 안 돼요."""
+    계정만들기(client, other_auth, "jiwoo1")
+
+    suggestions = client.get(
+        f"{BASE}/note-id/check", headers=auth, params={"value": "jiwoo07"}
+    ).json()["suggestions"]
+
+    assert "jiwoo1" not in suggestions
+
+
+def test_추천은_실제로_쓸_수_있다(client, auth, other_auth):
+    """추천받은 걸 그대로 검사하면 available이어야 해요."""
+    계정만들기(client, other_auth, "jiwoo07")
+
+    suggestions = client.get(
+        f"{BASE}/note-id/check", headers=auth, params={"value": "jiwoo07"}
+    ).json()["suggestions"]
+
+    for s in suggestions:
+        res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": s})
+        assert res.json()["available"] is True, f"추천했는데 못 쓰는 아이디: {s}"
