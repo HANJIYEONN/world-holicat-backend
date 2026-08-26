@@ -9,6 +9,7 @@ from ..cat_schemas import (
     NOTE_ID_MIN,
     NOTE_ID_PATTERN,
     CatUserCreate,
+    CatUserUpdate,
 )
 from ..database import get_db
 from ..models import CatUser
@@ -156,4 +157,36 @@ def create_me(
     db.add(user)
     db.commit()
     db.refresh(user)
+    return to_response(user)
+
+
+@router.patch("/me")
+def update_me(
+    payload: CatUserUpdate,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """내 정보 수정 — 내 정보 탭(시안 2f)에서 써요.
+
+    **보낸 항목만** 바꿔요. 안 보낸 건 그대로 둬요.
+    예: {"nickname": "지우"} 만 보내면 별명만 바뀌고 나머지는 안 건드려요.
+
+    짝꿍(partner)도 바꿀 수 있어요 — 말투만 정하는 거라 데이터·친구 관계에
+    영향이 없거든요 (D-17).
+    """
+    user = db.scalar(select(CatUser).where(CatUser.user_email == user_email))
+    if user is None:
+        raise HTTPException(status_code=404, detail="아직 수첩이 없어요")
+
+    # exclude_unset=True → 진짜로 보낸 항목만 꺼내요.
+    # 이게 없으면 안 보낸 항목까지 None 으로 덮어써버려요.
+    changes = payload.model_dump(exclude_unset=True)
+
+    for field, value in changes.items():
+        setattr(user, field, value)
+
+    if changes:
+        db.commit()
+        db.refresh(user)
+
     return to_response(user)
