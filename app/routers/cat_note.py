@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..ai_grader import accuracy_percent, grade_sentences
 from ..cat_schemas import (
     FRIEND_LIMIT,
+    MEANING_MAX,
     NOTE_ID_MAX,
     NOTE_ID_MIN,
     NOTE_ID_PATTERN,
@@ -19,6 +20,7 @@ from ..cat_schemas import (
     CommentCreate,
     FriendRequest,
     SentenceSave,
+    VocabCreate,
 )
 from ..database import get_db
 from ..models import (
@@ -37,8 +39,19 @@ from .auth import get_current_user_email
 router = APIRouter(prefix="/api/v1/cat-note", tags=["cat-note"])
 
 
-def to_response(user: CatUser) -> dict:
-    """CatUser 한 줄을 응답 모양으로 바꿔주는 도우미"""
+def vocab_count_of(db: Session, user_id: int) -> int:
+    """단어장에 모은 표현 개수. 단계를 세는 기준이에요 (D-23)."""
+    return db.scalar(
+        select(func.count(CatVocabItem.id)).where(CatVocabItem.cat_user_id == user_id)
+    ) or 0
+
+
+def to_response(user: CatUser, db: Session) -> dict:
+    """CatUser 한 줄을 응답 모양으로 바꿔주는 도우미.
+
+    writing_stage 는 **저장된 값을 쓰지 않고 그때그때 세요** (D-23).
+    저장해두면 GET /me 와 GET /stats 가 서로 다른 단계를 말할 수 있거든요.
+    """
     return {
         "exists": True,
         "note_id": user.note_id,
@@ -48,7 +61,7 @@ def to_response(user: CatUser) -> dict:
         "avatar": user.avatar,
         "learning_language": user.learning_language,
         "feedback_language": user.feedback_language,
-        "writing_stage": user.writing_stage,
+        "writing_stage": stage_of(vocab_count_of(db, user.id)),
         "daily_reminder": user.daily_reminder,
     }
 
@@ -147,7 +160,7 @@ def get_me(
     user = db.scalar(select(CatUser).where(CatUser.user_email == user_email))
     if user is None:
         return {"exists": False}
-    return to_response(user)
+    return to_response(user, db)
 
 
 @router.post("/me", status_code=201)
@@ -176,7 +189,7 @@ def create_me(
     db.add(user)
     db.commit()
     db.refresh(user)
-    return to_response(user)
+    return to_response(user, db)
 
 
 @router.patch("/me")
@@ -208,7 +221,7 @@ def update_me(
         db.commit()
         db.refresh(user)
 
-    return to_response(user)
+    return to_response(user, db)
 
 
 @router.get("/prompts/today")
@@ -301,6 +314,8 @@ def graded_sentences(db: Session, entry: CatEntry) -> list[dict]:
                 "translation": sentence.translation,
                 "corrections": [
                     {
+                        # 단어장에 담을 때(5장) 이 번호가 필요해요
+                        "correction_id": c.id,
                         "wrong_text": c.wrong_text,
                         "right_text": c.right_text,
                         "note": c.note,
@@ -475,15 +490,23 @@ EXPRESSIONS_PER_LEVEL = 50
 LEVEL_NAMES = ["초급 1", "초급 2", "중급 1", "중급 2", "고급 1", "고급 2"]
 
 
+def stage_of(vocab_count: int) -> int:
+    """내 단계 번호 (1~6). 표현 50개마다 하나씩 올라가요 (D-23).
+
+    GET /me 의 writing_stage 와 GET /stats 의 level 이 여기 하나를 같이 봐요.
+    """
+    return min(vocab_count // EXPRESSIONS_PER_LEVEL + 1, len(LEVEL_NAMES))
+
+
 def level_of(vocab_count: int) -> tuple[str, int]:
     """(단계 이름, 다음 단계까지 남은 표현 수)
 
     마지막 단계에 닿으면 더 올라갈 곳이 없어서 남은 개수는 0이에요.
     """
-    step = vocab_count // EXPRESSIONS_PER_LEVEL
-    if step >= len(LEVEL_NAMES) - 1:
+    stage = stage_of(vocab_count)
+    if stage == len(LEVEL_NAMES):
         return LEVEL_NAMES[-1], 0
-    return LEVEL_NAMES[step], (step + 1) * EXPRESSIONS_PER_LEVEL - vocab_count
+    return LEVEL_NAMES[stage - 1], stage * EXPRESSIONS_PER_LEVEL - vocab_count
 
 
 def average_accuracy(db: Session, user: CatUser, since: date, until: date) -> int | None:
@@ -561,9 +584,7 @@ def read_stats(
         .join(CatEntry, CatPraise.entry_id == CatEntry.id)
         .where(CatEntry.cat_user_id == user.id)
     )
-    vocab_count = db.scalar(
-        select(func.count(CatVocabItem.id)).where(CatVocabItem.cat_user_id == user.id)
-    )
+    vocab_count = vocab_count_of(db, user.id)
 
     today = date.today()
     this_week = average_accuracy(db, user, today - timedelta(days=6), today)
@@ -571,14 +592,14 @@ def read_stats(
     # 지난주에 쓴 날이 없으면 비교할 게 없어요 — 그래서 0 이 아니라 None.
     diff = None if this_week is None or last_week is None else this_week - last_week
 
-    level, to_next = level_of(vocab_count or 0)
+    level, to_next = level_of(vocab_count)
     return {
         "streak_days": streak,
         "total_stamps": stamps,
         "praises_received": praises or 0,
         "weekly_accuracy": this_week,
         "weekly_accuracy_diff": diff,
-        "vocab_count": vocab_count or 0,
+        "vocab_count": vocab_count,
         "level": level,
         "expressions_to_next_level": to_next,
     }
@@ -946,3 +967,102 @@ def write_comment(
     db.commit()
     db.refresh(comment)
     return comment_card(comment, user)
+
+
+# ══════════════════════════════════════════════════════════
+#  5장 — 단어장
+# ══════════════════════════════════════════════════════════
+#  D-16 으로 화면이 하나로 합쳐져서, 어른 전용이 아니라 모두가 써요.
+#  여기 모은 개수가 내 단계를 정해요 (D-23).
+
+
+def vocab_card(item: CatVocabItem) -> dict:
+    return {
+        "vocab_id": item.id,
+        "expression": item.expression,
+        "meaning": item.meaning,
+        "correction_id": item.correction_id,
+        "created_at": item.created_at.isoformat(timespec="seconds")
+        if item.created_at
+        else None,
+    }
+
+
+@router.get("/vocab")
+def read_vocab(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """내 단어장 — 최근에 담은 것부터."""
+    user = require_user(db, user_email)
+    items = db.scalars(
+        select(CatVocabItem)
+        .where(CatVocabItem.cat_user_id == user.id)
+        .order_by(CatVocabItem.id.desc())
+    )
+    return {"vocab": [vocab_card(item) for item in items]}
+
+
+@router.post("/vocab", status_code=201)
+def save_vocab(
+    payload: VocabCreate,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """교정 하나를 단어장에 담아요."""
+    user = require_user(db, user_email)
+
+    correction = db.get(CatCorrection, payload.correction_id)
+    if correction is None:
+        raise HTTPException(status_code=404, detail="그런 교정이 없어요")
+
+    # 이 교정이 정말 내 글에서 나온 건지 확인해요.
+    # 교정 → 문장 → 수첩 순서로 거슬러 올라가면 주인이 나와요.
+    owner_id = db.scalar(
+        select(CatEntry.cat_user_id)
+        .join(CatSentence, CatSentence.entry_id == CatEntry.id)
+        .where(CatSentence.id == correction.sentence_id)
+    )
+    if owner_id != user.id:
+        raise HTTPException(
+            status_code=403, detail="내 수첩에서 나온 표현만 담을 수 있어요"
+        )
+
+    already = db.scalar(
+        select(CatVocabItem).where(
+            CatVocabItem.cat_user_id == user.id,
+            CatVocabItem.correction_id == correction.id,
+        )
+    )
+    if already is not None:
+        raise HTTPException(status_code=409, detail="이미 단어장에 있어요")
+
+    item = CatVocabItem(
+        cat_user_id=user.id,
+        correction_id=correction.id,
+        expression=correction.right_text,
+        # meaning 칸이 200자라 문법 노트가 길면 잘라요.
+        # 전체 설명은 그날 수첩(3-2)을 열면 그대로 남아 있어요.
+        meaning=(correction.note or "")[:MEANING_MAX] or None,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return vocab_card(item)
+
+
+@router.delete("/vocab/{vocab_id}", status_code=204)
+def remove_vocab(
+    vocab_id: int,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """단어장에서 빼기."""
+    user = require_user(db, user_email)
+
+    item = db.get(CatVocabItem, vocab_id)
+    if item is None or item.cat_user_id != user.id:
+        raise HTTPException(status_code=404, detail="그런 표현이 없어요")
+
+    db.delete(item)
+    db.commit()

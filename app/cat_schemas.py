@@ -93,3 +93,19 @@ class CommentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: CommentText
+
+
+# ── 5장 단어장 ───────────────────────────────────────────
+MEANING_MAX = 200  # cat_vocab_items.meaning 컬럼 길이
+
+
+class VocabCreate(BaseModel):
+    """단어장에 담기 — POST /vocab
+
+    교정에서만 담을 수 있어요. 아무 말이나 적어 넣는 메모장이 아니라
+    "내가 오늘 틀려서 배운 것"을 모으는 자리거든요.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    correction_id: int
