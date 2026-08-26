@@ -3,24 +3,29 @@ from datetime import date, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..ai_grader import accuracy_percent, grade_sentences
 from ..cat_schemas import (
+    FRIEND_LIMIT,
     NOTE_ID_MAX,
     NOTE_ID_MIN,
     NOTE_ID_PATTERN,
     SENTENCES_PER_ENTRY,
     CatUserCreate,
     CatUserUpdate,
+    CommentCreate,
+    FriendRequest,
     SentenceSave,
 )
 from ..database import get_db
 from ..models import (
+    CatComment,
     CatCorrection,
     CatEntry,
+    CatFriendship,
     CatPraise,
     CatSentence,
     CatUser,
@@ -607,3 +612,337 @@ def read_entry_by_date(
         "sentences": graded,
         "new_expressions": learned_expressions(graded),
     }
+
+
+# ══════════════════════════════════════════════════════════
+#  4장 — 친구
+# ══════════════════════════════════════════════════════════
+
+
+def user_card(user: CatUser) -> dict:
+    """친구 목록·검색에 보여줄 최소 정보. 이메일 같은 건 절대 안 나가요."""
+    return {"note_id": user.note_id, "nickname": user.nickname, "avatar": user.avatar}
+
+
+def friendship_between(db: Session, one_id: int, other_id: int) -> CatFriendship | None:
+    """두 사람 사이의 관계. 누가 먼저 신청했든 하나로 찾아요."""
+    return db.scalar(
+        select(CatFriendship).where(
+            or_(
+                and_(
+                    CatFriendship.requester_id == one_id,
+                    CatFriendship.receiver_id == other_id,
+                ),
+                and_(
+                    CatFriendship.requester_id == other_id,
+                    CatFriendship.receiver_id == one_id,
+                ),
+            )
+        )
+    )
+
+
+def friend_ids(db: Session, user_id: int) -> list[int]:
+    """수락된 친구들의 id. 내가 신청한 것과 받은 것을 합쳐서 봐요 (D-22)."""
+    rows = db.execute(
+        select(CatFriendship.requester_id, CatFriendship.receiver_id).where(
+            CatFriendship.status == "accepted",
+            or_(
+                CatFriendship.requester_id == user_id,
+                CatFriendship.receiver_id == user_id,
+            ),
+        )
+    ).all()
+    return [
+        row.receiver_id if row.requester_id == user_id else row.requester_id
+        for row in rows
+    ]
+
+
+def ensure_friend_room(db: Session, user_id: int, message: str) -> None:
+    """친구 자리가 남았는지 확인해요. 꽉 찼으면 409."""
+    if len(friend_ids(db, user_id)) >= FRIEND_LIMIT:
+        raise HTTPException(status_code=409, detail=message)
+
+
+FULL_ME = f"친구는 {FRIEND_LIMIT}명까지 사귈 수 있어요"
+FULL_THEM = "그 친구는 이미 친구가 가득 찼어요"
+
+
+def friend_entry(
+    db: Session, entry_id: int, user: CatUser, allow_own: bool = False
+) -> CatEntry:
+    """친구 수첩을 꺼내오되, 볼 자격이 있는지 먼저 확인해요.
+
+    남의 수첩을 id만 바꿔가며 훔쳐보지 못하게 막는 자리예요.
+    """
+    entry = db.get(CatEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="그런 수첩이 없어요")
+    if entry.cat_user_id == user.id:
+        if allow_own:
+            return entry
+        raise HTTPException(status_code=403, detail="내 수첩에는 칭찬도장을 못 줘요")
+    if entry.cat_user_id not in friend_ids(db, user.id):
+        raise HTTPException(status_code=403, detail="친구의 수첩만 볼 수 있어요")
+    return entry
+
+
+def comment_card(comment: CatComment, writer: CatUser) -> dict:
+    return {
+        "comment_id": comment.id,
+        "note_id": writer.note_id,
+        "nickname": writer.nickname,
+        "avatar": writer.avatar,
+        "content": comment.content,
+        "created_at": comment.created_at.isoformat(timespec="seconds")
+        if comment.created_at
+        else None,
+    }
+
+
+@router.get("/users/search")
+def search_user(
+    note_id: Annotated[str, Query(min_length=NOTE_ID_MIN, max_length=NOTE_ID_MAX)],
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """수첩 아이디로 찾기 — **정확히 같을 때만** 찾아져요 (NF-04).
+
+    "민" 만 넣어도 찾아지면 모르는 어른이 아이들을 훑을 수 있어요.
+    그래서 부분 검색은 일부러 안 만들어요.
+    """
+    require_user(db, user_email)
+    found = db.scalar(select(CatUser).where(CatUser.note_id == note_id.lower()))
+    if found is None:
+        return {"found": False}
+    return {"found": True, **user_card(found)}
+
+
+@router.get("/friends")
+def read_friends(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """내 친구 목록 + 나에게 온 친구 신청."""
+    user = require_user(db, user_email)
+
+    ids = friend_ids(db, user.id)
+    friends = (
+        db.scalars(select(CatUser).where(CatUser.id.in_(ids)).order_by(CatUser.nickname))
+        if ids
+        else []
+    )
+
+    waiting = db.execute(
+        select(CatFriendship, CatUser)
+        .join(CatUser, CatFriendship.requester_id == CatUser.id)
+        .where(CatFriendship.receiver_id == user.id, CatFriendship.status == "pending")
+        .order_by(CatFriendship.id)
+    ).all()
+
+    return {
+        "friends": [user_card(friend) for friend in friends],
+        "pending_received": [
+            {"friendship_id": friendship.id, **user_card(sender)}
+            for friendship, sender in waiting
+        ],
+        # 화면에 "내 친구 4 / 10" 을 그릴 때 10을 프론트에 또 적지 않게 같이 내려줘요
+        "max_friends": FRIEND_LIMIT,
+    }
+
+
+@router.post("/friends", status_code=201)
+def request_friend(
+    payload: FriendRequest,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """친구 신청 — 수첩 아이디로."""
+    user = require_user(db, user_email)
+
+    target = db.scalar(select(CatUser).where(CatUser.note_id == payload.note_id.lower()))
+    if target is None:
+        raise HTTPException(status_code=404, detail="그런 수첩 아이디를 못 찾았어요")
+    if target.id == user.id:
+        raise HTTPException(status_code=400, detail="나에게는 친구 신청을 못 해요")
+    if friendship_between(db, user.id, target.id) is not None:
+        raise HTTPException(status_code=409, detail="이미 친구이거나 신청했어요")
+
+    ensure_friend_room(db, user.id, FULL_ME)
+    ensure_friend_room(db, target.id, FULL_THEM)
+
+    friendship = CatFriendship(
+        requester_id=user.id, receiver_id=target.id, status="pending"
+    )
+    db.add(friendship)
+    db.commit()
+    db.refresh(friendship)
+    return {
+        "friendship_id": friendship.id,
+        "status": friendship.status,
+        **user_card(target),
+    }
+
+
+@router.post("/friends/{friendship_id}/accept")
+def accept_friend(
+    friendship_id: int,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """친구 신청 수락 — 받은 사람만 할 수 있어요."""
+    user = require_user(db, user_email)
+
+    friendship = db.get(CatFriendship, friendship_id)
+    # 내가 받은 신청이 아니면 "없다" 고 해요.
+    # 403 이라고 하면 "그 번호의 신청은 있구나" 를 알려주는 셈이거든요.
+    if friendship is None or friendship.receiver_id != user.id:
+        raise HTTPException(status_code=404, detail="그런 친구 신청이 없어요")
+    if friendship.status == "accepted":
+        raise HTTPException(status_code=409, detail="이미 친구예요")
+
+    # 신청할 땐 자리가 있었어도 그 사이에 찼을 수 있어서 양쪽 다 다시 봐요 (D-22)
+    ensure_friend_room(db, user.id, FULL_ME)
+    ensure_friend_room(db, friendship.requester_id, FULL_THEM)
+
+    friendship.status = "accepted"
+    db.commit()
+    return {
+        "friendship_id": friendship.id,
+        "status": "accepted",
+        **user_card(db.get(CatUser, friendship.requester_id)),
+    }
+
+
+@router.delete("/friends/{friendship_id}", status_code=204)
+def remove_friend(
+    friendship_id: int,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """거절 · 친구 끊기 — 신청한 쪽도 받은 쪽도 지울 수 있어요."""
+    user = require_user(db, user_email)
+
+    friendship = db.get(CatFriendship, friendship_id)
+    if friendship is None or user.id not in (
+        friendship.requester_id,
+        friendship.receiver_id,
+    ):
+        raise HTTPException(status_code=404, detail="그런 친구가 없어요")
+
+    db.delete(friendship)
+    db.commit()
+
+
+@router.get("/friends/feed")
+def read_friend_feed(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """친구들의 **오늘** 수첩. 오늘 아직 시작 안 한 친구는 안 나와요."""
+    user = require_user(db, user_email)
+
+    ids = friend_ids(db, user.id)
+    if not ids:
+        return {"feed": []}
+
+    rows = db.execute(
+        select(CatEntry, CatUser)
+        .join(CatUser, CatEntry.cat_user_id == CatUser.id)
+        .where(CatEntry.cat_user_id.in_(ids), CatEntry.entry_date == date.today())
+        .order_by(CatEntry.id)
+    ).all()
+
+    feed = []
+    for entry, friend in rows:
+        sentences = sentences_of(db, entry)
+        praise_count = db.scalar(
+            select(func.count(CatPraise.id)).where(CatPraise.entry_id == entry.id)
+        )
+        mine = db.scalar(
+            select(func.count(CatPraise.id)).where(
+                CatPraise.entry_id == entry.id, CatPraise.giver_id == user.id
+            )
+        )
+        moment = entry.completed_at or entry.created_at
+        feed.append(
+            {
+                "entry_id": entry.id,
+                **user_card(friend),
+                "learning_language": friend.learning_language,
+                "status": "complete" if entry.is_complete else "writing",
+                "progress": f"{len(sentences)}/{SENTENCES_PER_ENTRY}",
+                # 시각만 내려주고 "10분 전" 같은 말은 화면에서 만들어요.
+                # 앱이 4개 언어라 서버가 문구를 만들면 번역까지 서버 몫이 되거든요.
+                "written_at": moment.isoformat(timespec="seconds") if moment else None,
+                # 친구에게는 **쓴 그대로** 보여줘요. 교정본이 아니라요.
+                "sentences": [s.original_text for s in sentences],
+                "praise_count": praise_count or 0,
+                "i_praised": bool(mine),
+            }
+        )
+    return {"feed": feed}
+
+
+@router.post("/entries/{entry_id}/praises", status_code=201)
+def give_praise(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """칭찬도장 💛 — 한 수첩에 한 번만."""
+    user = require_user(db, user_email)
+    entry = friend_entry(db, entry_id, user)
+
+    already = db.scalar(
+        select(CatPraise).where(
+            CatPraise.entry_id == entry.id, CatPraise.giver_id == user.id
+        )
+    )
+    if already is not None:
+        raise HTTPException(status_code=409, detail="이미 칭찬도장을 줬어요")
+
+    db.add(CatPraise(entry_id=entry.id, giver_id=user.id))
+    db.commit()
+    count = db.scalar(
+        select(func.count(CatPraise.id)).where(CatPraise.entry_id == entry.id)
+    )
+    return {"praise_count": count or 0}
+
+
+@router.get("/entries/{entry_id}/comments")
+def read_comments(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """댓글 목록 — 친구 수첩과 **내 수첩** 둘 다 볼 수 있어요."""
+    user = require_user(db, user_email)
+    entry = friend_entry(db, entry_id, user, allow_own=True)
+
+    rows = db.execute(
+        select(CatComment, CatUser)
+        .join(CatUser, CatComment.writer_id == CatUser.id)
+        .where(CatComment.entry_id == entry.id)
+        .order_by(CatComment.id)
+    ).all()
+    return {"comments": [comment_card(comment, writer) for comment, writer in rows]}
+
+
+@router.post("/entries/{entry_id}/comments", status_code=201)
+def write_comment(
+    entry_id: int,
+    payload: CommentCreate,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """댓글 쓰기 (200자 이내). 비속어 필터는 2차예요 (D-07)."""
+    user = require_user(db, user_email)
+    entry = friend_entry(db, entry_id, user, allow_own=True)
+
+    comment = CatComment(entry_id=entry.id, writer_id=user.id, content=payload.content)
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+    return comment_card(comment, user)
