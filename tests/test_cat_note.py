@@ -288,3 +288,117 @@ def test_추천은_실제로_쓸_수_있다(client, auth, other_auth):
     for s in suggestions:
         res = client.get(f"{BASE}/note-id/check", headers=auth, params={"value": s})
         assert res.json()["available"] is True, f"추천했는데 못 쓰는 아이디: {s}"
+
+
+# ── PATCH /me (내 정보 수정) ────────────────────────
+
+
+def test_수정도_로그인이_필요하다(client):
+    assert client.patch(f"{BASE}/me", json={"nickname": "지우"}).status_code == 401
+
+
+def test_수첩이_없으면_404(client, auth):
+    assert client.patch(f"{BASE}/me", headers=auth, json={"nickname": "지우"}).status_code == 404
+
+
+def test_별명만_바꾼다(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+
+    res = client.patch(f"{BASE}/me", headers=auth, json={"nickname": "지우니"})
+
+    assert res.status_code == 200
+    assert res.json()["nickname"] == "지우니"
+
+
+def test_안_보낸_항목은_그대로_둔다(client, auth):
+    """PATCH 의 핵심 — 보낸 것만 바꿔요."""
+    계정만들기(client, auth, "jiwoo07")
+    client.patch(f"{BASE}/me", headers=auth, json={"bio": "그림 좋아해요"})
+
+    # 별명만 바꿔도 소개는 살아있어야 해요
+    body = client.patch(f"{BASE}/me", headers=auth, json={"nickname": "지우니"}).json()
+
+    assert body["nickname"] == "지우니"
+    assert body["bio"] == "그림 좋아해요"  # 안 보냈으니 그대로
+    assert body["note_id"] == "jiwoo07"
+
+
+def test_짝꿍을_바꿀_수_있다(client, auth):
+    """D-17 — 말투만 정하는 거라 바꿔도 괜찮아요."""
+    계정만들기(client, auth, "jiwoo07", partner="kongi")
+
+    res = client.patch(f"{BASE}/me", headers=auth, json={"partner": "meokmul"})
+
+    assert res.json()["partner"] == "meokmul"
+
+
+def test_여러_개를_한_번에_바꾼다(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+
+    res = client.patch(
+        f"{BASE}/me",
+        headers=auth,
+        json={"nickname": "지우니", "avatar": "dino", "daily_reminder": True},
+    )
+
+    body = res.json()
+    assert body["nickname"] == "지우니"
+    assert body["avatar"] == "dino"
+    assert body["daily_reminder"] is True
+
+
+def test_소개를_지울_수_있다(client, auth):
+    """null 을 보내면 비우기 — 안 보내는 것과는 달라요."""
+    계정만들기(client, auth, "jiwoo07")
+    client.patch(f"{BASE}/me", headers=auth, json={"bio": "그림 좋아해요"})
+
+    body = client.patch(f"{BASE}/me", headers=auth, json={"bio": None}).json()
+
+    assert body["bio"] is None
+
+
+def test_빈_요청은_아무것도_안_바꾼다(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+
+    res = client.patch(f"{BASE}/me", headers=auth, json={})
+
+    assert res.status_code == 200
+    assert res.json()["note_id"] == "jiwoo07"
+
+
+# ── 못 바꾸는 것 ─────────────────────────────────────
+
+
+def test_수첩_아이디는_못_바꾼다(client, auth):
+    """바꾸면 친구가 나를 못 찾게 돼요 (D-10).
+
+    조용히 무시하지 않고 422 로 알려줘요 — 프론트가 잘못 보낸 걸 바로 알게요.
+    """
+    계정만들기(client, auth, "jiwoo07")
+
+    res = client.patch(f"{BASE}/me", headers=auth, json={"note_id": "newid123"})
+
+    assert res.status_code == 422
+    # 진짜로 안 바뀌었는지도 확인
+    assert client.get(f"{BASE}/me", headers=auth).json()["note_id"] == "jiwoo07"
+
+
+def test_오타난_항목도_422(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+    res = client.patch(f"{BASE}/me", headers=auth, json={"nickname_typo": "지우"})
+    assert res.status_code == 422
+
+
+def test_없는_짝꿍은_422(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+    assert client.patch(f"{BASE}/me", headers=auth, json={"partner": "멍멍이"}).status_code == 422
+
+
+def test_없는_아바타는_422(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+    assert client.patch(f"{BASE}/me", headers=auth, json={"avatar": "용"}).status_code == 422
+
+
+def test_너무_긴_별명은_422(client, auth):
+    계정만들기(client, auth, "jiwoo07")
+    assert client.patch(f"{BASE}/me", headers=auth, json={"nickname": "가" * 11}).status_code == 422
