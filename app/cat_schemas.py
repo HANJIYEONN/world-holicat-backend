@@ -1,6 +1,6 @@
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # ── 수첩 아이디 규칙 (D-10) ──────────────────────────────
 # 규칙을 여기 한 곳에만 적어두고, 검사 API(GET /note-id/check)와
@@ -49,3 +49,22 @@ class CatUserUpdate(BaseModel):
     learning_language: Optional[str] = Field(default=None, min_length=2, max_length=2)
     feedback_language: Optional[str] = Field(default=None, min_length=2, max_length=2)
     daily_reminder: Optional[bool] = None
+
+
+# ── 2장 쓰기 규칙 ────────────────────────────────────────
+SENTENCES_PER_ENTRY = 5  # 하루 5문장 (D-01)
+SENTENCE_MAX = 200  # 문장 하나 길이
+
+# strip_whitespace=True 라서 앞뒤 공백은 저절로 잘려요.
+# 그래서 "   " (공백만) 을 보내면 빈 글자가 되고, min_length=1 에 걸려 422 가 나요.
+SentenceText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=SENTENCE_MAX)
+]
+
+
+class SentenceSave(BaseModel):
+    """문장 한 개 저장 — PUT /entries/today/sentences/{position}"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: SentenceText
