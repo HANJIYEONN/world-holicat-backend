@@ -1,4 +1,5 @@
 import re
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from ..cat_schemas import (
 )
 from ..database import get_db
 from ..models import CatUser
+from ..writing_prompts import prompt_for
 from .auth import get_current_user_email
 
 router = APIRouter(prefix="/api/v1/cat-note", tags=["cat-note"])
@@ -190,3 +192,24 @@ def update_me(
         db.refresh(user)
 
     return to_response(user)
+
+
+@router.get("/prompts/today")
+def today_prompt(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """오늘의 글감 — "오늘 뭐 쓰지?" 하고 막힐 때 보여줘요 (WRITE-02).
+
+    같은 날이면 몇 번을 불러도 **같은 글감**이 나와요. 쓰는 도중에 질문이
+    바뀌면 당황스러우니까요.
+
+    글감은 사용자가 **설명받을 언어**로 나와요 — "무엇을 쓸지" 알려주는
+    안내라서, 배우는 언어가 아니라 알아듣는 언어여야 해요.
+    """
+    user = db.scalar(select(CatUser).where(CatUser.user_email == user_email))
+    language = None
+    if user is not None:
+        language = user.feedback_language or user.learning_language
+
+    return {"prompt": prompt_for(date.today(), language)}
