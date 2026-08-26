@@ -68,3 +68,28 @@ class SentenceSave(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: SentenceText
+
+
+# ── 4장 친구 규칙 ────────────────────────────────────────
+FRIEND_LIMIT = 10  # 친구는 최대 10명 (D-22)
+COMMENT_MAX = 200  # 댓글 길이
+
+CommentText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=COMMENT_MAX)
+]
+
+
+class FriendRequest(BaseModel):
+    """친구 신청 — POST /friends"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str = Field(min_length=NOTE_ID_MIN, max_length=NOTE_ID_MAX)
+
+
+class CommentCreate(BaseModel):
+    """댓글 쓰기 — POST /entries/{entry_id}/comments"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: CommentText
