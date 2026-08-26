@@ -402,3 +402,38 @@ def test_없는_아바타는_422(client, auth):
 def test_너무_긴_별명은_422(client, auth):
     계정만들기(client, auth, "jiwoo07")
     assert client.patch(f"{BASE}/me", headers=auth, json={"nickname": "가" * 11}).status_code == 422
+
+
+# ── GET /prompts/today (오늘의 글감) ────────────────
+
+
+def test_글감도_로그인이_필요하다(client):
+    assert client.get(f"{BASE}/prompts/today").status_code == 401
+
+
+def test_글감을_준다(client, auth):
+    res = client.get(f"{BASE}/prompts/today", headers=auth)
+    assert res.status_code == 200
+    assert res.json()["prompt"].strip()
+
+
+def test_계정이_없어도_글감은_나온다(client, auth):
+    """아이디 만들기 전에도 글감 화면을 미리 보여줄 수 있게요."""
+    assert client.get(f"{BASE}/prompts/today", headers=auth).status_code == 200
+
+
+def test_설명_언어에_맞춰_나온다(client, auth):
+    """한국어를 배우면서 설명은 영어로 받는 사람에겐 영어 글감을."""
+    계정만들기(client, auth, "jiwoo07")
+    client.patch(f"{BASE}/me", headers=auth, json={"feedback_language": "en"})
+
+    prompt = client.get(f"{BASE}/prompts/today", headers=auth).json()["prompt"]
+
+    # 영어 글감엔 한글이 없어야 해요
+    assert not any("가" <= ch <= "힣" for ch in prompt), prompt
+
+
+def test_같은_날_두_번_불러도_같다(client, auth):
+    a = client.get(f"{BASE}/prompts/today", headers=auth).json()["prompt"]
+    b = client.get(f"{BASE}/prompts/today", headers=auth).json()["prompt"]
+    assert a == b
