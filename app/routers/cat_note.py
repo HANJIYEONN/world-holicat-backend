@@ -2,8 +2,8 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,14 @@ from ..cat_schemas import (
     SentenceSave,
 )
 from ..database import get_db
-from ..models import CatCorrection, CatEntry, CatSentence, CatUser
+from ..models import (
+    CatCorrection,
+    CatEntry,
+    CatPraise,
+    CatSentence,
+    CatUser,
+    CatVocabItem,
+)
 from ..writing_prompts import prompt_for
 from .auth import get_current_user_email
 
@@ -450,4 +457,153 @@ def complete_today_entry(
         "new_expressions": learned_expressions(graded),
         "streak_days": streak,
         "total_stamps": stamps,
+    }
+
+
+# ══════════════════════════════════════════════════════════
+#  3장 — 기록 보기 (달력 · 통계)
+# ══════════════════════════════════════════════════════════
+
+# 단계 규칙 — 표현을 50개 모을 때마다 한 단계 올라가요.
+# 명세서 예시(단어 124개 → "중급 1", 다음까지 26개)에 맞춘 값이에요.
+EXPRESSIONS_PER_LEVEL = 50
+LEVEL_NAMES = ["초급 1", "초급 2", "중급 1", "중급 2", "고급 1", "고급 2"]
+
+
+def level_of(vocab_count: int) -> tuple[str, int]:
+    """(단계 이름, 다음 단계까지 남은 표현 수)
+
+    마지막 단계에 닿으면 더 올라갈 곳이 없어서 남은 개수는 0이에요.
+    """
+    step = vocab_count // EXPRESSIONS_PER_LEVEL
+    if step >= len(LEVEL_NAMES) - 1:
+        return LEVEL_NAMES[-1], 0
+    return LEVEL_NAMES[step], (step + 1) * EXPRESSIONS_PER_LEVEL - vocab_count
+
+
+def average_accuracy(db: Session, user: CatUser, since: date, until: date) -> int | None:
+    """그 기간에 다 쓴 날들의 정확도 평균. 쓴 날이 없으면 None.
+
+    0 이 아니라 None 인 이유 — 아직 안 쓴 사람에게 "정확도 0%"라고
+    보여주면 못했다는 뜻으로 읽혀요. 화면에서 카드를 숨길 수 있게 None 을 줘요.
+    """
+    scores = list(
+        db.scalars(
+            select(CatEntry.accuracy).where(
+                CatEntry.cat_user_id == user.id,
+                CatEntry.is_complete.is_(True),
+                CatEntry.accuracy.is_not(None),
+                CatEntry.entry_date >= since,
+                CatEntry.entry_date <= until,
+            )
+        )
+    )
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores))
+
+
+@router.get("/entries")
+def read_month_entries(
+    year: Annotated[int, Query(ge=2000, le=2100)],
+    month: Annotated[int, Query(ge=1, le=12)],
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """달력 화면용 — 그 달 어느 날에 발도장이 있는지."""
+    user = require_user(db, user_email)
+
+    first_day = date(year, month, 1)
+    # 그 달의 마지막 날을 직접 세는 대신 "다음 달 1일보다 앞" 으로 잡아요.
+    # 그러면 28일·29일·30일·31일을 따로 신경 쓰지 않아도 돼요.
+    next_month_first = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+
+    entries = db.scalars(
+        select(CatEntry)
+        .where(
+            CatEntry.cat_user_id == user.id,
+            CatEntry.entry_date >= first_day,
+            CatEntry.entry_date < next_month_first,
+        )
+        .order_by(CatEntry.entry_date)
+    )
+    days = [
+        {
+            "date": entry.entry_date.isoformat(),
+            "is_complete": entry.is_complete,
+            "accuracy": entry.accuracy,
+        }
+        for entry in entries
+    ]
+    return {
+        "days": days,
+        "total_stamps_this_month": sum(1 for day in days if day["is_complete"]),
+    }
+
+
+@router.get("/stats")
+def read_stats(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """홈 화면 숫자 카드들 — 저장해둔 값이 아니라 부를 때마다 세는 값이에요."""
+    user = require_user(db, user_email)
+    streak, stamps = streak_and_stamps(db, user)
+
+    # 내 수첩들이 받은 칭찬도장 개수
+    praises = db.scalar(
+        select(func.count(CatPraise.id))
+        .join(CatEntry, CatPraise.entry_id == CatEntry.id)
+        .where(CatEntry.cat_user_id == user.id)
+    )
+    vocab_count = db.scalar(
+        select(func.count(CatVocabItem.id)).where(CatVocabItem.cat_user_id == user.id)
+    )
+
+    today = date.today()
+    this_week = average_accuracy(db, user, today - timedelta(days=6), today)
+    last_week = average_accuracy(db, user, today - timedelta(days=13), today - timedelta(days=7))
+    # 지난주에 쓴 날이 없으면 비교할 게 없어요 — 그래서 0 이 아니라 None.
+    diff = None if this_week is None or last_week is None else this_week - last_week
+
+    level, to_next = level_of(vocab_count or 0)
+    return {
+        "streak_days": streak,
+        "total_stamps": stamps,
+        "praises_received": praises or 0,
+        "weekly_accuracy": this_week,
+        "weekly_accuracy_diff": diff,
+        "vocab_count": vocab_count or 0,
+        "level": level,
+        "expressions_to_next_level": to_next,
+    }
+
+
+# ⚠️ 이 API는 파일 맨 아래에 있어야 해요.
+# /entries/today 보다 먼저 등록되면 "today" 를 날짜로 읽으려다 실패해요.
+# FastAPI 는 먼저 등록된 주소부터 맞춰보거든요.
+@router.get("/entries/{entry_date}")
+def read_entry_by_date(
+    entry_date: date,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """지난 날짜 수첩 펼쳐보기 — 채점 결과까지 같이 나와요."""
+    user = require_user(db, user_email)
+    entry = db.scalar(
+        select(CatEntry).where(
+            CatEntry.cat_user_id == user.id, CatEntry.entry_date == entry_date
+        )
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="그날은 쓴 수첩이 없어요")
+
+    graded = graded_sentences(db, entry)
+    return {
+        "entry_id": entry.id,
+        "entry_date": entry.entry_date.isoformat(),
+        "is_complete": entry.is_complete,
+        "accuracy": entry.accuracy,
+        "sentences": graded,
+        "new_expressions": learned_expressions(graded),
     }
