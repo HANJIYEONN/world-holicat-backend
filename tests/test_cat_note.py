@@ -389,7 +389,7 @@ def test_오타난_항목도_422(client, auth):
     assert res.status_code == 422
 
 
-def test_없는_짝꿍은_422(client, auth):
+def test_수정할_때_없는_짝꿍은_422(client, auth):
     계정만들기(client, auth, "jiwoo07")
     assert client.patch(f"{BASE}/me", headers=auth, json={"partner": "멍멍이"}).status_code == 422
 
