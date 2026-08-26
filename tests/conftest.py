@@ -26,6 +26,17 @@ TEST_EMAIL = "tester@example.com"
 
 
 @pytest.fixture(autouse=True)
+def no_real_ai(monkeypatch):
+    """💸 테스트가 진짜 AI를 부르지 못하게 막아요.
+
+    누나 컴퓨터에 ANTHROPIC_API_KEY 가 설정돼 있으면, 아무 생각 없이
+    grade_sentences() 를 부르는 테스트가 **진짜 돈을 씁니다.**
+    기본적으로 키를 지워두고, AI 경로를 테스트하는 곳만 직접 넣게 해요.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def fresh_db():
     """테스트 하나가 끝날 때마다 DB를 싹 비워요.
 
