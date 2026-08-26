@@ -126,6 +126,9 @@ class CatSentence(Base):
     original_text: Mapped[str] = mapped_column(Text, nullable=False)
     # AI가 고친 문장 (고칠 게 없으면 비어 있어요)
     corrected_text: Mapped[str] = mapped_column(Text, nullable=True)
+    # 번역 — 채점할 때 AI가 같이 만들어줘요 (D-20).
+    # 저장해두는 이유: 나중에 다시 보려고 AI를 또 부르면 돈이 나가요.
+    translation: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
 
 

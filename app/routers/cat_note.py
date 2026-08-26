@@ -1,19 +1,24 @@
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..ai_grader import accuracy_percent, grade_sentences
 from ..cat_schemas import (
     NOTE_ID_MAX,
     NOTE_ID_MIN,
     NOTE_ID_PATTERN,
+    SENTENCES_PER_ENTRY,
     CatUserCreate,
     CatUserUpdate,
+    SentenceSave,
 )
 from ..database import get_db
-from ..models import CatUser
+from ..models import CatCorrection, CatEntry, CatSentence, CatUser
 from ..writing_prompts import prompt_for
 from .auth import get_current_user_email
 
@@ -213,3 +218,236 @@ def today_prompt(
         language = user.feedback_language or user.learning_language
 
     return {"prompt": prompt_for(date.today(), language)}
+
+
+# ══════════════════════════════════════════════════════════
+#  2장 — 쓰기
+# ══════════════════════════════════════════════════════════
+
+
+def require_user(db: Session, user_email: str) -> CatUser:
+    """수첩 주인을 찾아와요. 아직 안 만들었으면 404."""
+    user = db.scalar(select(CatUser).where(CatUser.user_email == user_email))
+    if user is None:
+        raise HTTPException(status_code=404, detail="아직 수첩이 없어요")
+    return user
+
+
+def today_entry(db: Session, user: CatUser) -> CatEntry:
+    """오늘 수첩을 가져와요. 없으면 빈 수첩을 만들어서 줘요."""
+    today = date.today()
+    where = (CatEntry.cat_user_id == user.id, CatEntry.entry_date == today)
+
+    entry = db.scalar(select(CatEntry).where(*where))
+    if entry is not None:
+        return entry
+
+    entry = CatEntry(cat_user_id=user.id, entry_date=today)
+    db.add(entry)
+    try:
+        db.commit()
+    except IntegrityError:
+        # 요청 두 개가 거의 동시에 오면 둘 다 "오늘 것이 없네?" 하고 만들려 해요.
+        # 늦은 쪽은 uq_cat_entry_user_date 규칙에 막히는데, 그게 정상이에요.
+        # 먼저 만들어진 수첩을 다시 찾아서 쓰면 돼요.
+        db.rollback()
+        return db.scalar(select(CatEntry).where(*where))
+    db.refresh(entry)
+    return entry
+
+
+def sentences_of(db: Session, entry: CatEntry) -> list[CatSentence]:
+    """그 수첩의 문장들을 1번부터 순서대로."""
+    return list(
+        db.scalars(
+            select(CatSentence)
+            .where(CatSentence.entry_id == entry.id)
+            .order_by(CatSentence.position)
+        )
+    )
+
+
+def graded_sentences(db: Session, entry: CatEntry) -> list[dict]:
+    """채점이 끝난 문장들을 응답 모양으로 바꿔요.
+
+    새로 채점했든 예전 것을 다시 열어봤든 **항상 같은 모양**이 나오게 하려고
+    저장된 값에서만 만들어요.
+    """
+    result = []
+    for sentence in sentences_of(db, entry):
+        corrections = db.scalars(
+            select(CatCorrection)
+            .where(CatCorrection.sentence_id == sentence.id)
+            .order_by(CatCorrection.id)
+        )
+        result.append(
+            {
+                "position": sentence.position,
+                "original_text": sentence.original_text,
+                "corrected_text": sentence.corrected_text,
+                # 번역은 교정 카드에 같이 나와요 (D-20). 따로 부르는 API 는 없어요.
+                "translation": sentence.translation,
+                "corrections": [
+                    {
+                        "wrong_text": c.wrong_text,
+                        "right_text": c.right_text,
+                        "note": c.note,
+                        "pronunciation": c.pronunciation,
+                    }
+                    for c in corrections
+                ],
+            }
+        )
+    return result
+
+
+def learned_expressions(graded: list[dict]) -> list[str]:
+    """새로 배운 표현 = 오늘 고쳐준 것들 (중복 빼고 순서대로).
+
+    AI 도 new_expressions 를 따로 돌려주지만 저장할 칸이 없어요.
+    교정에서 그때그때 뽑아 쓰면 다시 열어봐도 늘 같은 목록이 나와요.
+    """
+    learned = []
+    for sentence in graded:
+        for correction in sentence["corrections"]:
+            if correction["right_text"] not in learned:
+                learned.append(correction["right_text"])
+    return learned
+
+
+def streak_and_stamps(db: Session, user: CatUser) -> tuple[int, int]:
+    """(연속 기록 일수, 발도장 개수)
+
+    발도장은 다 쓴 날의 개수예요.
+    연속 기록은 오늘부터 하루씩 거슬러 올라가다가 빈 날을 만나면 멈춰요.
+    """
+    done = set(
+        db.scalars(
+            select(CatEntry.entry_date).where(
+                CatEntry.cat_user_id == user.id, CatEntry.is_complete.is_(True)
+            )
+        )
+    )
+    streak = 0
+    day = date.today()
+    while day in done:
+        streak += 1
+        day -= timedelta(days=1)
+    return streak, len(done)
+
+
+@router.get("/entries/today")
+def read_today_entry(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """오늘 수첩 가져오기 — 홈 화면과 쓰기 화면에서 써요."""
+    user = require_user(db, user_email)
+    entry = today_entry(db, user)
+    return {
+        "entry_id": entry.id,
+        "entry_date": entry.entry_date.isoformat(),
+        "is_complete": entry.is_complete,
+        "accuracy": entry.accuracy,
+        # 쓰는 중엔 교정을 안 보여줘요 (D-12) — 그래서 쓴 글만 그대로 돌려줘요.
+        "sentences": [
+            {"position": s.position, "text": s.original_text}
+            for s in sentences_of(db, entry)
+        ],
+    }
+
+
+@router.put("/entries/today/sentences/{position}")
+def save_sentence(
+    position: Annotated[int, Path(ge=1, le=SENTENCES_PER_ENTRY)],
+    payload: SentenceSave,
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """문장 한 개 저장 — 쓸 때마다 바로 불러요 (NF-06, 글이 유실되면 안 돼요)."""
+    user = require_user(db, user_email)
+    entry = today_entry(db, user)
+    if entry.is_complete:
+        raise HTTPException(status_code=400, detail="오늘 수첩은 이미 다 냈어요")
+
+    sentence = db.scalar(
+        select(CatSentence).where(
+            CatSentence.entry_id == entry.id, CatSentence.position == position
+        )
+    )
+    if sentence is None:
+        sentence = CatSentence(
+            entry_id=entry.id, position=position, original_text=payload.text
+        )
+        db.add(sentence)
+    else:
+        sentence.original_text = payload.text
+
+    db.commit()
+    db.refresh(sentence)
+    return {
+        "position": sentence.position,
+        "text": sentence.original_text,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+@router.post("/entries/today/complete")
+def complete_today_entry(
+    db: Session = Depends(get_db),
+    user_email: str = Depends(get_current_user_email),
+):
+    """다 썼어요! — AI 채점은 하루에 여기서 딱 한 번만 해요 (D-12)."""
+    user = require_user(db, user_email)
+    entry = today_entry(db, user)
+
+    # 이미 낸 수첩이면 저장해둔 결과를 그대로 돌려줘요.
+    # 💸 여기서 AI 를 다시 부르면 같은 글에 돈을 두 번 내게 돼요.
+    if not entry.is_complete:
+        written = [s for s in sentences_of(db, entry) if s.original_text.strip()]
+        if len(written) < SENTENCES_PER_ENTRY:
+            raise HTTPException(
+                status_code=400,
+                detail=f"아직 다 못 썼어요 ({len(written)}/{SENTENCES_PER_ENTRY})",
+            )
+
+        result = grade_sentences(
+            [s.original_text for s in written],
+            learning_language=user.learning_language,
+            feedback_language=user.feedback_language,
+            partner=user.partner,
+        )
+
+        # 우리가 보낸 순서대로 짝을 지어요.
+        # AI 가 알려준 position 을 그대로 믿었다가 번호가 밀리면
+        # 엉뚱한 문장에 교정이 붙어버려요.
+        for sentence, grade in zip(written, result.sentences):
+            sentence.corrected_text = grade.corrected_text
+            sentence.translation = grade.translation
+            for correction in grade.corrections:
+                db.add(
+                    CatCorrection(
+                        sentence_id=sentence.id,
+                        wrong_text=correction.wrong_text,
+                        right_text=correction.right_text,
+                        note=correction.note,
+                        pronunciation=correction.pronunciation,
+                    )
+                )
+
+        entry.is_complete = True
+        entry.completed_at = datetime.now()
+        entry.accuracy = accuracy_percent(result)
+        db.commit()
+
+    graded = graded_sentences(db, entry)
+    streak, stamps = streak_and_stamps(db, user)
+    return {
+        "entry_id": entry.id,
+        "is_complete": entry.is_complete,
+        "accuracy": entry.accuracy,
+        "sentences": graded,
+        "new_expressions": learned_expressions(graded),
+        "streak_days": streak,
+        "total_stamps": stamps,
+    }
