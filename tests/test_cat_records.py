@@ -347,3 +347,34 @@ def test_DB가_찍는_시각도_한국_시간이다(client, auth):
         차이 = abs((now_kst() - entry.created_at).total_seconds())
 
     assert 차이 < 120, "created_at 이 한국 시간이 아니에요"
+
+
+def test_오늘_안_써도_어제까지_연속은_살아있다(client, auth):
+    """아침에 들어왔을 때 "연속 0일" 이라고 하면
+    어제까지 쌓아온 게 끊긴 것처럼 보여요. 오늘이 끝날 때까지는 기다려줘요."""
+    make_account(client, auth)
+    today = date.today()
+    add_entry(today - timedelta(days=1))
+    add_entry(today - timedelta(days=2))
+    # 오늘은 아직 안 썼어요
+
+    assert client.get(f"{BASE}/stats", headers=auth).json()["streak_days"] == 2
+
+
+def test_어제도_안_썼으면_연속이_끊긴다(client, auth):
+    """봐주는 건 오늘 하루까지예요."""
+    make_account(client, auth)
+    today = date.today()
+    add_entry(today - timedelta(days=2))
+    add_entry(today - timedelta(days=3))
+
+    assert client.get(f"{BASE}/stats", headers=auth).json()["streak_days"] == 0
+
+
+def test_오늘_쓰면_연속에_오늘이_들어간다(client, auth):
+    make_account(client, auth)
+    today = date.today()
+    add_entry(today)
+    add_entry(today - timedelta(days=1))
+
+    assert client.get(f"{BASE}/stats", headers=auth).json()["streak_days"] == 2
