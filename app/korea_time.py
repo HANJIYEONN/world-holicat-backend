@@ -23,3 +23,15 @@ def now_kst() -> datetime:
     DB 컬럼이 시간대 없는 DateTime 이라 tzinfo 는 떼고 넣어요.
     """
     return datetime.now(KST).replace(tzinfo=None)
+
+
+def to_iso(moment: datetime | None) -> str | None:
+    """DB에 담긴 시각을 **시간대까지 붙여서** 내보내요.
+
+    DB 컬럼에는 한국 시간이 시간대 없이 들어 있어요. 그대로 내보내면
+    다른 나라에서 보는 사람의 브라우저가 그걸 자기 나라 시간으로 읽어서
+    "10분 전" 이 "9시간 전" 이 돼버려요.
+    """
+    if moment is None:
+        return None
+    return moment.replace(tzinfo=KST).isoformat(timespec="seconds")

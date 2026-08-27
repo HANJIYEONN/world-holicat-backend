@@ -378,3 +378,19 @@ def test_오늘_쓰면_연속에_오늘이_들어간다(client, auth):
     add_entry(today - timedelta(days=1))
 
     assert client.get(f"{BASE}/stats", headers=auth).json()["streak_days"] == 2
+
+
+def test_내보내는_시각에는_시간대가_붙는다(client, auth):
+    """시간대 없이 내보내면 다른 나라 브라우저가 자기 시간으로 읽어요.
+    "10분 전" 이 "9시간 전" 이 돼버려요 (D-25 — 문구는 화면에서 만들거든요)."""
+    make_account(client, auth)
+    saved = client.put(
+        f"{BASE}/entries/today/sentences/1", headers=auth, json={"text": "한 줄"}
+    ).json()
+
+    assert saved["saved_at"].endswith("+09:00"), saved["saved_at"]
+    # 붙인 시간대로 읽으면 지금과 가까워야 해요
+    from datetime import datetime, timezone
+
+    when = datetime.fromisoformat(saved["saved_at"])
+    assert abs((datetime.now(timezone.utc) - when).total_seconds()) < 120

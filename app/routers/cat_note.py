@@ -25,7 +25,7 @@ from ..cat_schemas import (
 from ..database import get_db
 
 # 하루의 기준은 한국 시간 자정이에요 (D-15)
-from ..korea_time import now_kst, today_kst
+from ..korea_time import now_kst, to_iso, today_kst
 from ..models import (
     CatComment,
     CatCorrection,
@@ -425,7 +425,7 @@ def save_sentence(
     return {
         "position": sentence.position,
         "text": sentence.original_text,
-        "saved_at": now_kst().isoformat(timespec="seconds"),
+        "saved_at": to_iso(now_kst()),
     }
 
 
@@ -741,9 +741,7 @@ def comment_card(comment: CatComment, writer: CatUser) -> dict:
         "nickname": writer.nickname,
         "avatar": writer.avatar,
         "content": comment.content,
-        "created_at": comment.created_at.isoformat(timespec="seconds")
-        if comment.created_at
-        else None,
+        "created_at": to_iso(comment.created_at),
     }
 
 
@@ -927,7 +925,7 @@ def read_friend_feed(
                 "progress": f"{len(sentences)}/{SENTENCES_PER_ENTRY}",
                 # 시각만 내려주고 "10분 전" 같은 말은 화면에서 만들어요.
                 # 앱이 4개 언어라 서버가 문구를 만들면 번역까지 서버 몫이 되거든요.
-                "written_at": moment.isoformat(timespec="seconds") if moment else None,
+                "written_at": to_iso(moment),
                 # 친구에게는 **쓴 그대로** 보여줘요. 교정본이 아니라요.
                 "sentences": [s.original_text for s in sentences],
                 "praise_count": praise_count or 0,
@@ -1020,9 +1018,7 @@ def vocab_card(item: CatVocabItem) -> dict:
         "expression": item.expression,
         "meaning": item.meaning,
         "correction_id": item.correction_id,
-        "created_at": item.created_at.isoformat(timespec="seconds")
-        if item.created_at
-        else None,
+        "created_at": to_iso(item.created_at),
     }
 
 
