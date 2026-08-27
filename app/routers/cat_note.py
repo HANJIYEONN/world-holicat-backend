@@ -360,8 +360,13 @@ def streak_and_stamps(db: Session, user: CatUser) -> tuple[int, int]:
             )
         )
     )
+    # 오늘 아직 안 썼어도 어제까지 이어온 건 살아 있어요.
+    # 아침에 "연속 0일" 이라고 하면 어제까지 쌓은 게 끊긴 것처럼 보이거든요.
+    # 오늘이 끝날 때까지는 기다려줍니다.
+    today = today_kst()
+    day = today if today in done else today - timedelta(days=1)
+
     streak = 0
-    day = today_kst()
     while day in done:
         streak += 1
         day -= timedelta(days=1)
