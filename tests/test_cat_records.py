@@ -4,13 +4,13 @@
 그래서 DB에 직접 넣어두고 조회만 확인해요.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import engine
-from app.models import CatEntry, CatUser
+from app.models import CatEntry, CatSentence, CatUser
 from app.routers.cat_note import level_of
 from tests.conftest import TEST_EMAIL
 
@@ -42,18 +42,28 @@ def finish_today(client, auth):
     return client.post(f"{BASE}/entries/today/complete", headers=auth)
 
 
-def add_entry(day, accuracy=100, complete=True, email=TEST_EMAIL):
-    """지난 날짜 수첩을 DB에 직접 하나 넣어요."""
+def add_entry(day, accuracy=100, complete=True, email=TEST_EMAIL, sentences=1):
+    """지난 날짜 수첩을 DB에 직접 하나 넣어요.
+
+    문장도 같이 넣어요. 문장이 하나도 없으면 "앱을 열어만 본 날"이라
+    달력에 안 나오거든요.
+    """
     with Session(engine) as db:
         user = db.scalar(select(CatUser).where(CatUser.user_email == email))
-        db.add(
-            CatEntry(
-                cat_user_id=user.id,
-                entry_date=day,
-                is_complete=complete,
-                accuracy=accuracy if complete else None,
-            )
+        entry = CatEntry(
+            cat_user_id=user.id,
+            entry_date=day,
+            is_complete=complete,
+            accuracy=accuracy if complete else None,
         )
+        db.add(entry)
+        db.flush()  # entry.id 를 받아오려고요
+        for position in range(1, sentences + 1):
+            db.add(
+                CatSentence(
+                    entry_id=entry.id, position=position, original_text=f"{position}번 문장"
+                )
+            )
         db.commit()
 
 
@@ -121,6 +131,30 @@ def test_12월도_제대로_끊긴다(client, auth):
 
     days = client.get(f"{BASE}/entries?year=2026&month=12", headers=auth).json()["days"]
     assert [d["date"] for d in days] == ["2026-12-31"]
+
+
+def test_열어만_본_날은_달력에_안_나온다(client, auth):
+    """GET /entries/today 는 빈 수첩을 만들어둬요.
+
+    그 빈 수첩까지 달력에 그리면, 앱을 열기만 한 날이
+    "쓰다 만 날"처럼 보여요.
+    """
+    make_account(client, auth)
+    today = date.today()
+
+    client.get(f"{BASE}/entries/today", headers=auth)  # 열어만 봄
+
+    body = client.get(
+        f"{BASE}/entries?year={today.year}&month={today.month}", headers=auth
+    ).json()
+    assert body["days"] == []
+
+    # 한 글자라도 쓰면 그때부터 보여요
+    client.put(f"{BASE}/entries/today/sentences/1", headers=auth, json={"text": "한 줄 썼어요"})
+    body = client.get(
+        f"{BASE}/entries?year={today.year}&month={today.month}", headers=auth
+    ).json()
+    assert [day["date"] for day in body["days"]] == [today.isoformat()]
 
 
 def test_이상한_달은_422(client, auth):
@@ -265,3 +299,51 @@ def test_단계는_표현_50개마다_올라간다():
 def test_마지막_단계에서는_더_안_올라간다():
     assert level_of(250) == ("고급 2", 0)
     assert level_of(9999) == ("고급 2", 0)
+
+
+# ── 하루가 바뀌는 기준 (D-15) ─────────────────────────
+
+
+def test_하루는_한국_시간_자정에_바뀐다():
+    """배포 서버는 UTC라서, 그냥 date.today() 를 쓰면
+    한국 아침 9시 전까지 서버는 아직 "어제"라고 생각해요.
+    학교 가기 전에 쓴 글이 어제 수첩에 들어가면 안 돼요.
+
+    (한국은 서머타임이 없어서 UTC+9 로 고정이에요.)
+    """
+    from datetime import timezone
+
+    from app.routers.cat_note import today_kst
+
+    한국_지금 = datetime.now(timezone.utc) + timedelta(hours=9)
+    assert today_kst() == 한국_지금.date()
+
+
+def test_저장할_시각에는_시간대가_안_붙는다():
+    """DB 컬럼이 시간대 없는 DateTime 이라, tzinfo 가 붙어 있으면
+    저장할 때 문제가 생겨요."""
+    from app.routers.cat_note import now_kst
+
+    assert now_kst().tzinfo is None
+
+
+def test_DB가_찍는_시각도_한국_시간이다(client, auth):
+    """created_at 을 DB(server_default=NOW())에 맡기면 UTC로 찍혀요.
+
+    그러면 파이썬이 넣는 completed_at 과 **9시간**이 어긋나서,
+    친구 피드의 "몇 분 전"이 9시간 틀리게 나와요.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.korea_time import now_kst
+    from app.models import CatEntry
+
+    make_account(client, auth)
+    client.put(f"{BASE}/entries/today/sentences/1", headers=auth, json={"text": "한 줄"})
+
+    with Session(engine) as db:
+        entry = db.scalar(select(CatEntry))
+        차이 = abs((now_kst() - entry.created_at).total_seconds())
+
+    assert 차이 < 120, "created_at 이 한국 시간이 아니에요"

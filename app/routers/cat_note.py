@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -23,6 +23,9 @@ from ..cat_schemas import (
     VocabCreate,
 )
 from ..database import get_db
+
+# 하루의 기준은 한국 시간 자정이에요 (D-15)
+from ..korea_time import now_kst, today_kst
 from ..models import (
     CatComment,
     CatCorrection,
@@ -37,6 +40,8 @@ from ..writing_prompts import prompt_for
 from .auth import get_current_user_email
 
 router = APIRouter(prefix="/api/v1/cat-note", tags=["cat-note"])
+
+
 
 
 def vocab_count_of(db: Session, user_id: int) -> int:
@@ -242,7 +247,7 @@ def today_prompt(
     if user is not None:
         language = user.feedback_language or user.learning_language
 
-    return {"prompt": prompt_for(date.today(), language)}
+    return {"prompt": prompt_for(today_kst(), language)}
 
 
 # ══════════════════════════════════════════════════════════
@@ -260,7 +265,7 @@ def require_user(db: Session, user_email: str) -> CatUser:
 
 def today_entry(db: Session, user: CatUser) -> CatEntry:
     """오늘 수첩을 가져와요. 없으면 빈 수첩을 만들어서 줘요."""
-    today = date.today()
+    today = today_kst()
     where = (CatEntry.cat_user_id == user.id, CatEntry.entry_date == today)
 
     entry = db.scalar(select(CatEntry).where(*where))
@@ -356,7 +361,7 @@ def streak_and_stamps(db: Session, user: CatUser) -> tuple[int, int]:
         )
     )
     streak = 0
-    day = date.today()
+    day = today_kst()
     while day in done:
         streak += 1
         day -= timedelta(days=1)
@@ -415,7 +420,7 @@ def save_sentence(
     return {
         "position": sentence.position,
         "text": sentence.original_text,
-        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "saved_at": now_kst().isoformat(timespec="seconds"),
     }
 
 
@@ -463,7 +468,7 @@ def complete_today_entry(
                 )
 
         entry.is_complete = True
-        entry.completed_at = datetime.now()
+        entry.completed_at = now_kst()
         entry.accuracy = accuracy_percent(result)
         db.commit()
 
@@ -546,15 +551,29 @@ def read_month_entries(
     # 그러면 28일·29일·30일·31일을 따로 신경 쓰지 않아도 돼요.
     next_month_first = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
 
-    entries = db.scalars(
-        select(CatEntry)
-        .where(
-            CatEntry.cat_user_id == user.id,
-            CatEntry.entry_date >= first_day,
-            CatEntry.entry_date < next_month_first,
+    entries = list(
+        db.scalars(
+            select(CatEntry)
+            .where(
+                CatEntry.cat_user_id == user.id,
+                CatEntry.entry_date >= first_day,
+                CatEntry.entry_date < next_month_first,
+            )
+            .order_by(CatEntry.entry_date)
         )
-        .order_by(CatEntry.entry_date)
     )
+
+    # 앱을 열기만 해도 빈 수첩이 하나 생겨요 (GET /entries/today 가 만들어요).
+    # 그 빈 수첩까지 달력에 그리면 "열어만 본 날"이 "쓰다 만 날"처럼 보여요.
+    # 그래서 한 글자라도 쓴 날만 남겨요.
+    written_ids = set(
+        db.scalars(
+            select(CatSentence.entry_id).where(
+                CatSentence.entry_id.in_([entry.id for entry in entries])
+            )
+        )
+    ) if entries else set()
+
     days = [
         {
             "date": entry.entry_date.isoformat(),
@@ -562,6 +581,7 @@ def read_month_entries(
             "accuracy": entry.accuracy,
         }
         for entry in entries
+        if entry.id in written_ids
     ]
     return {
         "days": days,
@@ -586,7 +606,7 @@ def read_stats(
     )
     vocab_count = vocab_count_of(db, user.id)
 
-    today = date.today()
+    today = today_kst()
     this_week = average_accuracy(db, user, today - timedelta(days=6), today)
     last_week = average_accuracy(db, user, today - timedelta(days=13), today - timedelta(days=7))
     # 지난주에 쓴 날이 없으면 비교할 게 없어요 — 그래서 0 이 아니라 None.
@@ -797,7 +817,13 @@ def request_friend(
         requester_id=user.id, receiver_id=target.id, status="pending"
     )
     db.add(friendship)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 두 사람이 서로에게 동시에 신청하면 여기서 만나요
+        db.rollback()
+        raise HTTPException(status_code=409, detail="이미 친구이거나 신청했어요") from None
+
     db.refresh(friendship)
     return {
         "friendship_id": friendship.id,
@@ -871,7 +897,7 @@ def read_friend_feed(
     rows = db.execute(
         select(CatEntry, CatUser)
         .join(CatUser, CatEntry.cat_user_id == CatUser.id)
-        .where(CatEntry.cat_user_id.in_(ids), CatEntry.entry_date == date.today())
+        .where(CatEntry.cat_user_id.in_(ids), CatEntry.entry_date == today_kst())
         .order_by(CatEntry.id)
     ).all()
 
@@ -925,7 +951,14 @@ def give_praise(
         raise HTTPException(status_code=409, detail="이미 칭찬도장을 줬어요")
 
     db.add(CatPraise(entry_id=entry.id, giver_id=user.id))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 빠르게 두 번 누르면 위 검사를 둘 다 통과할 수 있어요.
+        # uq_cat_praise_entry_giver 가 막아주는데, 그건 "이미 줬다"는 뜻이에요.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="이미 칭찬도장을 줬어요") from None
+
     count = db.scalar(
         select(func.count(CatPraise.id)).where(CatPraise.entry_id == entry.id)
     )

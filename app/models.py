@@ -17,6 +17,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
 
+# cat_ 테이블 시각은 DB 시계(UTC) 대신 한국 시간으로 찍어요 (D-15)
+from .korea_time import now_kst
+
 
 class HeadacheEntry(Base):
     """두통 기록 한 건."""
@@ -90,7 +93,7 @@ class CatUser(Base):
     feedback_language: Mapped[str] = mapped_column(String(2), nullable=True)  # 설명받을 언어
     writing_stage: Mapped[int] = mapped_column(SmallInteger, default=1)  # 내 단계
     daily_reminder: Mapped[bool] = mapped_column(Boolean, default=False)  # 매일 알림
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatEntry(Base):
@@ -109,7 +112,7 @@ class CatEntry(Base):
     is_complete: Mapped[bool] = mapped_column(Boolean, default=False)  # 5문장 다 썼는지
     completed_at: Mapped[str] = mapped_column(DateTime, nullable=True)  # 완성한 시각
     accuracy: Mapped[int] = mapped_column(SmallInteger, nullable=True)  # 정확도 %
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatSentence(Base):
@@ -129,7 +132,7 @@ class CatSentence(Base):
     # 번역 — 채점할 때 AI가 같이 만들어줘요 (D-20).
     # 저장해두는 이유: 나중에 다시 보려고 AI를 또 부르면 돈이 나가요.
     translation: Mapped[str] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatCorrection(Base):
@@ -145,7 +148,7 @@ class CatCorrection(Base):
     right_text: Mapped[str] = mapped_column(String(100), nullable=False)  # 고친 것 "좋아요"
     note: Mapped[str] = mapped_column(Text, nullable=True)  # 문법 노트 (짝꿍 말투로)
     pronunciation: Mapped[str] = mapped_column(String(100), nullable=True)  # 발음 "[조아요]"
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatFriendship(Base):
@@ -167,7 +170,7 @@ class CatFriendship(Base):
     status: Mapped[str] = mapped_column(
         Enum("pending", "accepted", name="friendship_status"), default="pending"
     )
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatPraise(Base):
@@ -179,7 +182,7 @@ class CatPraise(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     entry_id: Mapped[int] = mapped_column(ForeignKey("cat_entries.id"), nullable=False, index=True)
     giver_id: Mapped[int] = mapped_column(ForeignKey("cat_users.id"), nullable=False, index=True)
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatComment(Base):
@@ -191,7 +194,7 @@ class CatComment(Base):
     entry_id: Mapped[int] = mapped_column(ForeignKey("cat_entries.id"), nullable=False, index=True)
     writer_id: Mapped[int] = mapped_column(ForeignKey("cat_users.id"), nullable=False, index=True)
     content: Mapped[str] = mapped_column(String(200), nullable=False)
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
 
 
 class CatVocabItem(Base):
@@ -206,4 +209,4 @@ class CatVocabItem(Base):
     )  # 어느 교정에서 저장했는지
     expression: Mapped[str] = mapped_column(String(100), nullable=False)  # 배운 표현
     meaning: Mapped[str] = mapped_column(String(200), nullable=True)  # 뜻·설명
-    created_at: Mapped[str] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
