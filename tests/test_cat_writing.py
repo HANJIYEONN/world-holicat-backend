@@ -148,11 +148,18 @@ def test_앞뒤_공백은_잘린다(client, auth):
 
 
 def test_너무_긴_문장은_422(client, auth):
+    """한 문장은 50자까지 — 짧게 한 문장만 쓰는 연습이에요."""
     make_account(client, auth)
-    res = client.put(
-        f"{BASE}/entries/today/sentences/1", headers=auth, json={"text": "가" * 201}
+
+    딱_맞음 = client.put(
+        f"{BASE}/entries/today/sentences/1", headers=auth, json={"text": "가" * 50}
     )
-    assert res.status_code == 422
+    assert 딱_맞음.status_code == 200
+
+    한_글자_넘음 = client.put(
+        f"{BASE}/entries/today/sentences/1", headers=auth, json={"text": "가" * 51}
+    )
+    assert 한_글자_넘음.status_code == 422
 
 
 # ── 2-3 다 썼어요 (채점) ──────────────────────────────
