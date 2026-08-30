@@ -53,7 +53,7 @@ class CatUserUpdate(BaseModel):
 
 # ── 2장 쓰기 규칙 ────────────────────────────────────────
 SENTENCES_PER_ENTRY = 5  # 하루 5문장 (D-01)
-SENTENCE_MAX = 200  # 문장 하나 길이
+SENTENCE_MAX = 50  # 문장 하나 길이 — 짧게 한 문장만 쓰는 연습이에요
 
 # strip_whitespace=True 라서 앞뒤 공백은 저절로 잘려요.
 # 그래서 "   " (공백만) 을 보내면 빈 글자가 되고, min_length=1 에 걸려 422 가 나요.
