@@ -27,7 +27,7 @@ jobs:
 
             IMG_NAME="headacat-backend"
             CONTAINER_NAME="headacat-backend"
-            REPOSITORY_URL="https://github.com/HANJIYEONN/headache-log-backend.git"
+            REPOSITORY_URL="https://github.com/HANJIYEONN/world-holicat-backend.git"
 
             mkdir -p headacat
 
@@ -72,3 +72,5 @@ jobs:
               docker logs "$CONTAINER_NAME"
               exit 1
             fi
+
+            docker exec "$CONTAINER_NAME" python -m app.blog_seed
