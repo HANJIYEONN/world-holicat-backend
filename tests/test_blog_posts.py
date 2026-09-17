@@ -87,6 +87,20 @@ def test_글_하나를_읽는다(client, auth):
 
     assert res.status_code == 200
     assert res.json()["title"] == "제목"
+    assert res.json()["view_count"] == 0
+
+
+def test_글을_읽을_때마다_조회수가_올라간다(client, auth):
+    make_blog_user(client, auth, "수염냥")
+    post_id = client.post(
+        f"{BASE}/posts",
+        headers=auth,
+        json={"title": "조회할 글", "content": "본문"},
+    ).json()["id"]
+
+    assert client.post(f"{BASE}/posts/{post_id}/view", headers=auth).json()["view_count"] == 1
+    assert client.post(f"{BASE}/posts/{post_id}/view", headers=auth).json()["view_count"] == 2
+    assert client.get(f"{BASE}/posts", headers=auth).json()[0]["view_count"] == 2
 
 
 def test_내_글을_수정한다(client, auth):

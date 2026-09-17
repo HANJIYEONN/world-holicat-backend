@@ -57,6 +57,17 @@ class BlogPost(Base):
     )
 
 
+class BlogPostView(Base):
+    """기존 글 테이블을 바꾸지 않고 안전하게 보관하는 글별 조회수."""
+
+    __tablename__ = "blog_post_views"
+
+    post_id: Mapped[int] = mapped_column(
+        ForeignKey("blog_posts.id", ondelete="CASCADE"), primary_key=True
+    )
+    view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class HeadacheEntry(Base):
     """두통 기록 한 건."""
 
