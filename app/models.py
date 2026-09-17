@@ -21,6 +21,42 @@ from .database import Base
 from .korea_time import now_kst
 
 
+class BlogUser(Base):
+    """블로그에서만 사용하는 작성자 정보.
+
+    Google 이메일은 내부에서 작성자를 구분할 때만 쓰고, 블로그 화면에는
+    여기 저장한 닉네임만 보여줘요. 다른 서비스에서는 이 값을 사용하지 않습니다.
+    """
+
+    __tablename__ = "blog_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    nickname: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
+
+
+class BlogPost(Base):
+    """마법의 고양이 수염에 올라오는 글.
+
+    목록은 작성자와 관계없이 모두에게 보이고, 작성자 표시는 Google 정보가 아닌
+    BlogUser의 블로그 닉네임을 사용해요.
+    """
+
+    __tablename__ = "blog_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    blog_user_id: Mapped[int] = mapped_column(
+        ForeignKey("blog_users.id"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(DateTime, default=now_kst, server_default=func.now())
+    updated_at: Mapped[str] = mapped_column(
+        DateTime, default=now_kst, onupdate=now_kst, server_default=func.now()
+    )
+
+
 class HeadacheEntry(Base):
     """두통 기록 한 건."""
 
